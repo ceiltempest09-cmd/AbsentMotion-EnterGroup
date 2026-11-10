@@ -58,7 +58,7 @@ jobs:
           rm -rf third_party/whisper.cpp/models third_party/whisper.cpp/examples third_party/whisper.cpp/bindings third_party/ncnn/examples third_party/ncnn/benchmark third_party/ncnn/python third_party/ncnn/images
           echo 'org.gradle.java.home=/usr/lib/jvm/java-21-openjdk-amd64' >> gradle.properties
       - name: Build Skia
-        run: tools/build_skia.sh
+        run: bash tools/build_skia.sh
       - name: Build the foss APK
         run: ./gradlew :app:assembleFossRelease --no-daemon
       - name: Check unsigned APK packaging
@@ -107,8 +107,8 @@ jobs:
           echo 'org.gradle.java.home=/usr/lib/jvm/java-21-openjdk-amd64' >> gradle.properties
       - name: Build Skia for Android 8
         run: |
-          tools/build_skia.sh compat
-          tools/build_skia.sh compat32
+          bash tools/build_skia.sh compat
+          bash tools/build_skia.sh compat32
       - name: Build the compat APKs
         run: ./gradlew :app:assembleCompatRelease :app:assembleCompat32Release --no-daemon
       - name: Check unsigned APK packaging
@@ -161,8 +161,8 @@ jobs:
           echo 'org.gradle.java.home=/usr/lib/jvm/java-21-openjdk-amd64' >> gradle.properties
       - name: Build Skia for x86_64
         run: |
-          tools/build_skia.sh x64
-          tools/build_skia.sh compat-x64
+          bash tools/build_skia.sh x64
+          bash tools/build_skia.sh compat-x64
       - name: Build the x86_64 APKs
         run: |
           ./gradlew -PamAbi=x86_64 :app:assembleFossRelease :app:assembleCompatRelease --no-daemon
@@ -193,7 +193,7 @@ jobs:
         working-directory: /
         run: |
           apt-get update
-          apt-get install -y --no-install-recommends git ca-certificates curl unzip python3 python3-numpy python3-pil python3-fonttools nodejs clang openjdk-21-jdk-headless
+          apt-get install -y --no-install-recommends git ca-certificates curl unzip xz-utils python3 python3-numpy python3-pil python3-fonttools nodejs clang openjdk-21-jdk-headless
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           ref: ${{ inputs.verify_ref || '' }}
@@ -289,3 +289,4 @@ jobs:
             android/build/reports/tests
             android/build/reports/lint-results-*.xml
             build/test-repeats
+            
