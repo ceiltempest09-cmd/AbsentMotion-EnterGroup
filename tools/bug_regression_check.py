@@ -1,0 +1,380 @@
+#!/usr/bin/env python3
+import ast
+import importlib.util
+import os
+from pathlib import Path
+import re
+import shlex
+import struct
+import subprocess
+import sys
+import tempfile
+import unittest
+import zipfile
+
+ROOT = Path(__file__).resolve().parent.parent
+
+class ToolRegressions(unittest.TestCase):
+    def test_font_generator_output_is_publishable_and_checkable(self):
+        catalogue = ROOT / 'shared/kotlin/app/absentmotion/fonts/FontCatalog.kt'
+        self.assertIsNone(re.search(r'^\s*(//|/\*|\*)', catalogue.read_text(), re.M))
+        result = subprocess.run([sys.executable, str(ROOT / 'tools/gen_fonts.py'), '--check'], capture_output=True, text=True)
+        self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+
+    @unittest.skipUnless((ROOT / 'tools/publish_forbidden.txt').exists(), 'tools/publish_forbidden.txt is private and not in this checkout')
+    def test_relative_apk_is_resolved_from_the_callers_directory(self):
+        with tempfile.TemporaryDirectory() as folder:
+            with zipfile.ZipFile(Path(folder) / 'fixture.apk', 'w') as apk:
+                apk.writestr('assets/fixture.txt', 'fixture')
+            result = subprocess.run([str(ROOT / 'tools/publish_check.sh'), '--apk', './fixture.apk'], cwd=folder, capture_output=True, text=True)
+            self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+            self.assertIn('-- inside ./fixture.apk', result.stdout)
+
+    def test_patch_conflicts_abort_but_applied_patches_are_idempotent(self):
+        source = (ROOT / 'tools/build_skia.sh').read_text()
+        loop = source[source.index('for p in '):source.index('\nGN=')]
+        with tempfile.TemporaryDirectory() as folder:
+            folder = Path(folder)
+            (folder / 'tools/skia-patches').mkdir(parents=True)
+            (folder / 'tools/skia-patches/fix.patch').touch()
+            fake = folder / 'git'
+            fake.write_text('#!/bin/sh\ncase "$*" in *--reverse*) exit "${REVERSE_STATUS}";; *--check*) exit "${CHECK_STATUS}";; *) exit 0;; esac\n')
+            fake.chmod(0o755)
+            env = dict(os.environ, PATH=str(folder) + os.pathsep + os.environ['PATH'], ROOT=str(folder))
+            for check, reverse, expected in [(0, 1, 0), (1, 0, 0), (1, 1, 1)]:
+                result = subprocess.run(['sh', '-ec', loop], env=dict(env, CHECK_STATUS=str(check), REVERSE_STATUS=str(reverse)), capture_output=True)
+                self.assertEqual(expected, int(result.returncode != 0))
+
+    def test_shader_compile_errors_abort_the_build(self):
+        source = (ROOT / 'tools/sksl_check/build.sh').read_text()
+        loop = source[source.index('for f in '):source.index('\nclang++ $FLAGS -c "$HERE')]
+        with tempfile.TemporaryDirectory() as folder:
+            folder = Path(folder)
+            (folder / 'obj').mkdir()
+            compiler = folder / 'clang++'
+            compiler.write_text('#!/bin/sh\nexit 1\n')
+            compiler.chmod(0o755)
+            env = dict(os.environ, PATH=str(folder) + os.pathsep + os.environ['PATH'], OUT=str(folder), SKIA=str(folder), SRC='invalid.cpp', FLAGS='')
+            self.assertNotEqual(0, subprocess.run(['sh', '-ec', loop], env=env, capture_output=True).returncode)
+
+    def test_cached_touch_dex_is_sent_to_each_device(self):
+        with tempfile.TemporaryDirectory() as folder:
+            folder = Path(folder)
+            (folder / 'tools').mkdir()
+            script = folder / 'tools/touch.sh'
+            script.write_text((ROOT / 'tools/touch.sh').read_text())
+            (folder / 'tools/env.sh').write_text((ROOT / 'tools/env.sh').read_text())
+            (folder / 'tools/Touch.java').write_text('fixture')
+            (folder / 'android/build/touch').mkdir(parents=True)
+            (folder / 'android/build/touch/classes.dex').touch()
+            sdk = folder / 'Library/Android/sdk/platform-tools'
+            sdk.mkdir(parents=True)
+            adb = sdk / 'adb'
+            adb.write_text('#!/bin/sh\nprintf "%s\\n" "$*" >> "$TOUCH_LOG"\n')
+            adb.chmod(0o755)
+            log = folder / 'calls'
+            env = {k: v for k, v in os.environ.items() if k not in ('ANDROID_HOME', 'ANDROID_SDK_ROOT', 'ADB', 'SDK_ROOT')}
+            env.update(HOME=str(folder), TOUCH_LOG=str(log))
+            for target in ['emulator-5554', 'emulator-5556']:
+                subprocess.run(['sh', str(script)], env=dict(env, ANDROID_SERIAL=target), check=True, capture_output=True)
+            calls = log.read_text()
+            for target in ['emulator-5554', 'emulator-5556']:
+                self.assertIn('-s ' + target + ' push', calls)
+
+    def test_export_timing_reports_failures_and_zero_elapsed_time(self):
+        with tempfile.TemporaryDirectory() as folder:
+            scene = Path(folder) / 'scene.xml'
+            scene.write_text('<scene fps="30" totalTime="999"/>')
+            for logs in ['', '1.0 I AMEngine: attached color space 1\n', '1.0 I AMEngine: attached color space 1\n1.0 I AMExport: done\n', '1.0 I AMEngine: attached color space 1\n2.0 E AMExport: failed\n']:
+                helper = ROOT / 'tools/export_timing.py'
+                if helper.exists():
+                    cmd = [sys.executable, str(helper), str(scene)]
+                else:
+                    script = (ROOT / 'tools/export_speed.sh').read_text().split('python3 -c "', 1)[1].rsplit('"', 1)[0].replace('$SCENE', str(scene))
+                    cmd = [sys.executable, '-c', script]
+                result = subprocess.run(cmd, input=logs, text=True, capture_output=True)
+                self.assertNotEqual(0, result.returncode)
+                self.assertNotIn('Traceback', result.stderr)
+            if helper.exists():
+                result = subprocess.run([sys.executable, str(helper), str(scene)], input='1.0 I AMEngine: attached color space 1\n3.0 I AMExport: done\n', text=True, capture_output=True)
+                self.assertEqual(0, result.returncode, result.stderr)
+                self.assertIn('30 frames in 2.0 s', result.stdout)
+
+    def test_comment_check_fails_when_git_cannot_list_the_files(self):
+        with tempfile.TemporaryDirectory() as folder:
+            fake = Path(folder) / 'git'
+            env = dict(os.environ, PATH=folder + os.pathsep + os.environ['PATH'])
+            for script, message in [('#!/bin/sh\nexit 128\n', 'no file was checked'), ('#!/bin/sh\nexit 0\n', 'nothing was checked')]:
+                fake.write_text(script)
+                fake.chmod(0o755)
+                result = subprocess.run([sys.executable, str(ROOT / 'tools/comment_check.py')], env=env, capture_output=True, text=True)
+                self.assertNotEqual(0, result.returncode)
+                self.assertIn(message, result.stderr)
+
+    def test_comment_check_rejects_python_docstrings(self):
+        with tempfile.TemporaryDirectory() as folder:
+            folder = Path(folder)
+            source = folder / 'fixture.py'
+            source.write_text('"""A module description."""\nvalue = 1\n')
+            git = folder / 'git'
+            git.write_text('#!/bin/sh\nprintf "%s\\n" ' + shlex.quote(str(source)) + '\n')
+            git.chmod(0o755)
+            result = subprocess.run([sys.executable, str(ROOT / 'tools/comment_check.py')],
+                                    env=dict(os.environ, PATH=str(folder) + os.pathsep + os.environ['PATH']), capture_output=True, text=True)
+            self.assertNotEqual(0, result.returncode)
+            self.assertIn('fixture.py:1:', result.stdout)
+
+    @unittest.skipUnless((ROOT / 'tools/publish_forbidden.txt').exists(), 'tools/publish_forbidden.txt is private and not in this checkout')
+    def test_publish_check_fails_when_a_scanner_fails(self):
+        with tempfile.TemporaryDirectory() as folder:
+            folder = Path(folder)
+            python = folder / 'python3'
+            env = dict(os.environ, PATH=str(folder) + os.pathsep + os.environ['PATH'])
+            for scanner in ['tools/publish_scan.py', 'tools/comment_check.py']:
+                python.write_text('#!/bin/sh\nif [ "$1" = ' + shlex.quote(scanner) + ' ]; then exit 17; fi\nexec ' + shlex.quote(sys.executable) + ' "$@"\n')
+                python.chmod(0o755)
+                result = subprocess.run(['sh', str(ROOT / 'tools/publish_check.sh')], env=env, capture_output=True, text=True)
+                self.assertNotEqual(0, result.returncode, scanner + '\n' + result.stdout + result.stderr)
+                self.assertNotIn('publish_check: nothing found.', result.stdout)
+
+    def test_site_tests_are_required_in_ci_and_optional_elsewhere(self):
+        with tempfile.TemporaryDirectory() as folder:
+            env = {k: v for k, v in os.environ.items() if k != 'CI'}
+            env['PATH'] = folder
+            command = [sys.executable, str(ROOT / 'tools/site_build.py'), '--check']
+            local = subprocess.run(command, env=env, capture_output=True, text=True)
+            self.assertNotIn('did not run', local.stderr)
+            remote = subprocess.run(command, env=dict(env, CI='true'), capture_output=True, text=True)
+            self.assertNotEqual(0, remote.returncode)
+            self.assertIn('tools/site_test.js did not run', remote.stderr)
+
+    def test_full_check_refuses_native_libraries_older_than_the_native_code(self):
+        script = (ROOT / 'tools/check.sh').read_text()
+        function = script[script.index('native_libs() {'):script.index('\n}\n', script.index('native_libs() {')) + 3]
+        with tempfile.TemporaryDirectory() as folder:
+            folder = Path(folder)
+            lib = folder / 'android/build/intermediates/merged_native_libs/fossRelease/mergeFossReleaseNativeLibs/out/lib/arm64-v8a/libamengine.so'
+            source = folder / 'shared/cpp/engine.cpp'
+            run = lambda: subprocess.run(['sh', '-c', 'fail() { echo "FAILED: $1"; }; ' + function + '\nnative_libs fossRelease mergeFossReleaseNativeLibs; echo "rc=$? libs=$libs skipped=$skipped"'],
+                                         cwd=folder, capture_output=True, text=True).stdout
+            self.assertIn('rc=1', run())
+            self.assertIn('not built', run())
+            self.assertIn('skipped= fossRelease', run())
+            lib.parent.mkdir(parents=True)
+            lib.touch()
+            source.parent.mkdir(parents=True)
+            source.touch()
+            os.utime(source, (1000, 1000))
+            os.utime(lib, (2000, 2000))
+            self.assertIn('rc=0 libs=android/build/intermediates/merged_native_libs/fossRelease/mergeFossReleaseNativeLibs/out/lib/arm64-v8a', run())
+            os.utime(source, (3000, 3000))
+            stale = run()
+            self.assertIn('FAILED: the fossRelease native libraries are older than the native code', stale)
+            self.assertIn('rc=1', stale)
+            fresh = lib.with_name('liblame_jni.so')
+            fresh.touch()
+            os.utime(fresh, (4000, 4000))
+            mixed = run()
+            self.assertIn('FAILED: the fossRelease native libraries are older than the native code', mixed)
+            self.assertIn('rc=1', mixed)
+            os.utime(lib, (5000, 5000))
+            os.utime(fresh, (1000, 1000))
+            self.assertIn('rc=0', run())
+            ai = lib.with_name('libabsent_ai.so')
+            ai.touch()
+            os.utime(ai, (2000, 2000))
+            dependency = folder / 'third_party/ncnn/src/net.cpp'
+            dependency.parent.mkdir(parents=True)
+            dependency.touch()
+            os.utime(dependency, (3000, 3000))
+            self.assertIn('rc=1', run())
+
+    def test_python_policy_rejects_docstrings_but_allows_data_strings(self):
+        scanner = ROOT / 'tools/source_policy.py'
+        self.assertTrue(scanner.exists())
+        spec = importlib.util.spec_from_file_location('source_policy', scanner)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        quote = chr(34) * 3
+        for source in [quote + 'module' + quote, 'def f():\n    ' + quote + 'function' + quote, 'value = 1\n' + chr(35) + ' note\n']:
+            self.assertTrue(module.violations(source))
+        self.assertFalse(module.violations('data = ' + quote + 'payload' + quote))
+        self.assertFalse(module.violations('#!/usr/bin/env python3\nvalue = 1\n'))
+
+    def test_api_floor_refuses_failed_native_symbol_reads(self):
+        tree = ast.parse((ROOT / 'tools/api_floor.py').read_text())
+        functions = [node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name in ('nm', 'undefined')]
+        scope = {'subprocess': subprocess}
+        exec(compile(ast.Module(body=functions, type_ignores=[]), 'api_floor.py', 'exec'), scope)
+        with tempfile.TemporaryDirectory() as folder:
+            tool = Path(folder) / 'nm'
+            tool.write_text('#!/bin/sh\necho "invalid library" >&2\nexit 1\n')
+            tool.chmod(0o755)
+            for function, args in [('nm', [tool, ['--defined-only'], Path('invalid.so')]), ('undefined', [tool, Path('invalid.so')])]:
+                with self.assertRaises(subprocess.CalledProcessError):
+                    scope[function](*args)
+
+    def test_apk_packaging_rejects_compression_and_alignment_mismatches(self):
+        spec = importlib.util.spec_from_file_location('apk_check', ROOT / 'tools/apk_check.py')
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        library = bytearray(128)
+        library[:6] = b'\x7fELF\x02\x01'
+        struct.pack_into('<H', library, 18, 183)
+        struct.pack_into('<Q', library, 32, 64)
+        struct.pack_into('<HH', library, 54, 56, 1)
+        struct.pack_into('<I', library, 64, 1)
+        struct.pack_into('<Q', library, 112, 16384)
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / 'fixture.apk'
+            for compression, aligned in [(zipfile.ZIP_STORED, True), (zipfile.ZIP_STORED, False), (zipfile.ZIP_DEFLATED, False)]:
+                with self.subTest(compression=compression, aligned=aligned):
+                    with zipfile.ZipFile(path, 'w') as archive:
+                        archive.writestr('resources.arsc', b'res!')
+                        entry = zipfile.ZipInfo('lib/arm64-v8a/libfixture.so')
+                        entry.compress_type = compression
+                        if aligned:
+                            padding = (-archive.fp.tell() - 30 - len(entry.filename)) % 16384
+                            entry.extra = struct.pack('<HH', 0xffff, padding - 4) + bytes(padding - 4)
+                        archive.writestr(entry, library)
+                    self.assertEqual((1, 'arm64-v8a'), module.zip_packaging(path, True))
+                    if aligned:
+                        self.assertEqual((1, 'arm64-v8a'), module.zip_packaging(path, False))
+                    else:
+                        with self.assertRaisesRegex(ValueError, 'direct loading'):
+                            module.zip_packaging(path, False)
+            with zipfile.ZipFile(path, 'w') as archive:
+                archive.writestr('resources.arsc', b'res!', compress_type=zipfile.ZIP_DEFLATED)
+                archive.writestr('lib/arm64-v8a/libfixture.so', library)
+            with self.assertRaisesRegex(ValueError, 'resources.arsc'):
+                module.zip_packaging(path, True)
+            with zipfile.ZipFile(path, 'w') as archive:
+                archive.writestr('resources.arsc', b'res!')
+                archive.writestr('lib/arm64-v8a/libfixture.so', library)
+            damaged = bytearray(path.read_bytes())
+            damaged[damaged.index(b'res!')] ^= 1
+            path.write_bytes(damaged)
+            with self.assertRaises((ValueError, zipfile.BadZipFile)):
+                module.zip_packaging(path, True)
+            narrow = bytearray(96)
+            narrow[:6] = b'\x7fELF\x01\x01'
+            struct.pack_into('<H', narrow, 18, 40)
+            struct.pack_into('<I', narrow, 28, 52)
+            struct.pack_into('<HH', narrow, 42, 32, 1)
+            struct.pack_into('<I', narrow, 52, 1)
+            struct.pack_into('<I', narrow, 80, 4096)
+            self.assertEqual(('armeabi-v7a', 4096), module.elf_alignment(narrow, 'narrow.so'))
+            intel = bytearray(library)
+            struct.pack_into('<H', intel, 18, 62)
+            self.assertEqual(('x86_64', 16384), module.elf_alignment(intel, 'intel.so'))
+            struct.pack_into('<H', intel, 18, 3)
+            with self.assertRaisesRegex(ValueError, 'expected an arm64'):
+                module.elf_alignment(intel, 'i386.so')
+            for names, error in [(['lib/armeabi-v7a/libfixture.so'], None), (['lib/arm64-v8a/libfixture.so'], 'unexpected native ABI'), (['lib/armeabi-v7a/libfixture.so', 'lib/arm64-v8a/libother.so'], 'one native ABI')]:
+                with self.subTest(names=names):
+                    with zipfile.ZipFile(path, 'w') as archive:
+                        archive.writestr('resources.arsc', b'res!')
+                        archive.writestr(names[0], narrow)
+                        for name in names[1:]:
+                            archive.writestr(name, library)
+                    if error:
+                        with self.assertRaisesRegex(ValueError, error):
+                            module.zip_packaging(path, True)
+                    else:
+                        self.assertEqual((1, 'armeabi-v7a'), module.zip_packaging(path, True))
+            struct.pack_into('<I', narrow, 80, 1024)
+            with self.assertRaisesRegex(ValueError, '4 KB'):
+                module.elf_alignment(narrow, 'narrow.so')
+        with tempfile.TemporaryDirectory() as folder:
+            libs = Path(folder)
+            with self.assertRaisesRegex(ValueError, 'no native libraries'):
+                module.library_alignment([libs])
+            (libs / 'libgood.so').write_bytes(library)
+            (libs / 'notes.txt').write_text('not a library')
+            self.assertEqual((1, '16 KB'), module.library_alignment([libs]))
+            self.assertEqual((2, '16 KB'), module.library_alignment([libs, libs / 'libgood.so']))
+            struct.pack_into('<Q', library, 112, 4096)
+            (libs / 'libold.so').write_bytes(library)
+            with self.assertRaisesRegex(ValueError, 'libold.so: ELF load segment is not aligned for 16 KB pages'):
+                module.library_alignment([libs])
+            result = subprocess.run([sys.executable, str(ROOT / 'tools/apk_check.py'), '--libraries', str(libs)], capture_output=True, text=True)
+            self.assertEqual(1, result.returncode)
+            self.assertIn('libold.so', result.stderr)
+            (libs / 'libold.so').unlink()
+            result = subprocess.run([sys.executable, str(ROOT / 'tools/apk_check.py'), '--libraries', str(libs)], capture_output=True, text=True)
+            self.assertEqual(0, result.returncode, result.stderr)
+            self.assertIn('1 native libraries are aligned for 16 KB memory pages', result.stdout)
+        with self.assertRaisesRegex(ValueError, '16 KB'):
+            module.elf_alignment(library, 'fixture.so')
+        struct.pack_into('<Q', library, 112, 16384)
+        struct.pack_into('<Q', library, 72, 4096)
+        with self.assertRaisesRegex(ValueError, '16 KB'):
+            module.elf_alignment(library, 'shifted.so')
+        with self.assertRaises(ValueError):
+            module.elf_alignment(library[:64], 'truncated.so')
+
+    def test_publish_scan_reads_library_data_but_not_machine_code(self):
+        def library(code, data, sections=True):
+            elf = bytearray(248)
+            elf[:6] = b'\x7fELF\x01\x01'
+            elf[64:64 + len(code)] = code
+            elf[96:96 + len(data)] = data
+            if sections:
+                struct.pack_into('<I', elf, 0x20, 128)
+                struct.pack_into('<HH', elf, 0x2E, 40, 3)
+                struct.pack_into('<IIIIII', elf, 168, 0, 1, 6, 0, 64, 32)
+                struct.pack_into('<IIIIII', elf, 208, 0, 1, 2, 0, 96, 32)
+            return bytes(elf)
+        with tempfile.TemporaryDirectory() as folder:
+            folder = Path(folder)
+            (folder / 'words.txt').write_text('fixtureword\n')
+            cases = {'code.so': (library(b'FIXTUREWORD', b''), False), 'data.so': (library(b'', b'fixtureword'), True),
+                     'bare.so': (library(b'fixtureword', b'', sections=False), True)}
+            for name, (data, found) in cases.items():
+                (folder / name).write_bytes(data)
+                result = subprocess.run([sys.executable, str(ROOT / 'tools/publish_scan.py'), str(folder / 'words.txt'), str(folder / 'none.txt'), ''],
+                                        input=str(folder / name), capture_output=True, text=True)
+                self.assertEqual(0, result.returncode, result.stderr)
+                self.assertEqual(found, 'PROBLEM' in result.stdout, name)
+
+    def test_release_key_pin_is_read_from_the_app_and_must_be_unique(self):
+        spec = importlib.util.spec_from_file_location('apk_check', ROOT / 'tools/apk_check.py')
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        self.assertRegex(module.release_signer(), r'^[0-9a-f]{64}$')
+        with tempfile.TemporaryDirectory() as folder:
+            source = Path(folder) / 'UpdateSource.kt'
+            line = 'internal const val RELEASE_SIGNER = "%s"\n'
+            for text in ['', line % ('a' * 63), line % ('a' * 64) + line % ('b' * 64), line % ('A' * 64)]:
+                source.write_text(text)
+                with self.assertRaisesRegex(ValueError, 'RELEASE_SIGNER'):
+                    module.release_signer(source)
+            source.write_text('package x\n' + line % ('c' * 64))
+            self.assertEqual('c' * 64, module.release_signer(source))
+
+    def test_help_pictures_land_at_the_same_block_in_every_language_and_can_be_replaced(self):
+        spec = importlib.util.spec_from_file_location('help_shots', ROOT / 'tools/help_shots.py')
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        english = '\n\n'.join(['Intro.', '## One', 'First.', '- a\n- b', '## Two', 'Last.']) + '\n'
+        translated = english.replace('Intro.', 'Texto.').replace('First.', 'Primero.')
+        shot = {'id': 'demo', 'alt': {'en': 'English (1).', 'es': 'Espanol (1).'}}
+        place = {'section': 'One', 'block': 2}
+        for text, tag in ((english, 'en'), (translated, 'es')):
+            body = module.place_in(english, text, 'page', tag, [(shot, place)], ['demo'])
+            self.assertIn('- a\n- b\n\n![%s](img/demo.webp)\n\n## Two' % shot['alt'][tag], body)
+            self.assertEqual(body, module.place_in(english, body, 'page', tag, [(shot, place)], ['demo']))
+            self.assertEqual(text, module.strip_pictures(body, ['demo']))
+        with self.assertRaises(module.Failure):
+            module.place_in(english, translated.replace('- a\n- b', 'x'), 'page', 'es', [(shot, place)], ['demo'])
+        from PIL import Image
+        plain = Image.new('RGB', (200, 200), (200, 200, 200))
+        marked = module.annotate(plain.copy(), [((20, 20, 100, 100), 12, True)], [((40, 40), 1)], module.STYLE)
+        self.assertEqual(plain.size, marked.size)
+        self.assertNotEqual(plain.tobytes(), marked.tobytes())
+        tile = {'box': (20, 20, 100, 100), 'parent': -1, 'clickable': True}
+        self.assertEqual(tile['box'], module.hit_box([tile], {'box': (30, 30, 50, 50), 'parent': 0}, False))
+        self.assertEqual((30, 30, 50, 50), module.hit_box([tile], {'box': (30, 30, 50, 50), 'parent': 0}, True))
+
+if __name__ == '__main__':
+    unittest.main()
