@@ -40,10 +40,15 @@ jobs:
         run: |
           apt-get update
           apt-get install -y --no-install-recommends git ca-certificates curl unzip xz-utils python3 build-essential clang lld ninja-build openjdk-21-jdk-headless
+
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           submodules: recursive
           path: ${{ inputs.subdir || '.' }}
+
+      - name: Fix script permissions
+        run: chmod +x gradlew tools/*.sh
+
       - name: Install the Android SDK
         run: |
           mkdir -p "$ANDROID_HOME/cmdline-tools"
@@ -53,20 +58,26 @@ jobs:
           mv /tmp/cmdline-tools/cmdline-tools "$ANDROID_HOME/cmdline-tools/latest"
           yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null
           "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "platform-tools" "platforms;android-37.0" "build-tools;37.0.0" "cmake;3.31.6" "ndk;30.0.16248370"
+
       - name: Prepare the source as F-Droid does
         run: |
           rm -rf third_party/whisper.cpp/models third_party/whisper.cpp/examples third_party/whisper.cpp/bindings third_party/ncnn/examples third_party/ncnn/benchmark third_party/ncnn/python third_party/ncnn/images
           echo 'org.gradle.java.home=/usr/lib/jvm/java-21-openjdk-amd64' >> gradle.properties
+
       - name: Build Skia
         run: bash tools/build_skia.sh
+
       - name: Build the foss APK
         run: ./gradlew :app:assembleFossRelease --no-daemon
+
       - name: Check unsigned APK packaging
         run: python3 tools/apk_check.py --unsigned android/build/outputs/apk/foss/release/*.apk
+
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: foss-apk
           path: ${{ inputs.subdir || '.' }}/android/build/outputs/apk/foss/release/*.apk
+
       - name: Check the lowest Android version the native libraries need
         run: python3 tools/api_floor.py android/build/outputs/apk/foss/release/*.apk
 
@@ -88,10 +99,15 @@ jobs:
         run: |
           apt-get update
           apt-get install -y --no-install-recommends git ca-certificates curl unzip xz-utils python3 build-essential clang lld ninja-build openjdk-21-jdk-headless
+
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           submodules: recursive
           path: ${{ inputs.subdir || '.' }}
+
+      - name: Fix script permissions
+        run: chmod +x gradlew tools/*.sh
+
       - name: Install the Android SDK
         run: |
           mkdir -p "$ANDROID_HOME/cmdline-tools"
@@ -101,24 +117,30 @@ jobs:
           mv /tmp/cmdline-tools/cmdline-tools "$ANDROID_HOME/cmdline-tools/latest"
           yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null
           "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "platform-tools" "platforms;android-37.0" "build-tools;37.0.0" "cmake;3.31.6" "ndk;30.0.16248370"
+
       - name: Prepare the source as F-Droid does
         run: |
           rm -rf third_party/whisper.cpp/models third_party/whisper.cpp/examples third_party/whisper.cpp/bindings third_party/ncnn/examples third_party/ncnn/benchmark third_party/ncnn/python third_party/ncnn/images
           echo 'org.gradle.java.home=/usr/lib/jvm/java-21-openjdk-amd64' >> gradle.properties
+
       - name: Build Skia for Android 8
         run: |
           bash tools/build_skia.sh compat
           bash tools/build_skia.sh compat32
+
       - name: Build the compat APKs
         run: ./gradlew :app:assembleCompatRelease :app:assembleCompat32Release --no-daemon
+
       - name: Check unsigned APK packaging
         run: python3 tools/apk_check.py --unsigned android/build/outputs/apk/compat/release/*.apk android/build/outputs/apk/compat32/release/*.apk
+
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: compat-apk
           path: |
             ${{ inputs.subdir || '.' }}/android/build/outputs/apk/compat/release/*.apk
             ${{ inputs.subdir || '.' }}/android/build/outputs/apk/compat32/release/*.apk
+
       - name: Check that the native libraries load on Android 8
         run: |
           python3 tools/api_floor.py --min 26 android/build/outputs/apk/compat/release/*.apk
@@ -142,10 +164,15 @@ jobs:
         run: |
           apt-get update
           apt-get install -y --no-install-recommends git ca-certificates curl unzip xz-utils python3 build-essential clang lld ninja-build openjdk-21-jdk-headless
+
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           submodules: recursive
           path: ${{ inputs.subdir || '.' }}
+
+      - name: Fix script permissions
+        run: chmod +x gradlew tools/*.sh
+
       - name: Install the Android SDK
         run: |
           mkdir -p "$ANDROID_HOME/cmdline-tools"
@@ -155,26 +182,32 @@ jobs:
           mv /tmp/cmdline-tools/cmdline-tools "$ANDROID_HOME/cmdline-tools/latest"
           yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null
           "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "platform-tools" "platforms;android-37.0" "build-tools;37.0.0" "cmake;3.31.6" "ndk;30.0.16248370"
+
       - name: Prepare the source as F-Droid does
         run: |
           rm -rf third_party/whisper.cpp/models third_party/whisper.cpp/examples third_party/whisper.cpp/bindings third_party/ncnn/examples third_party/ncnn/benchmark third_party/ncnn/python third_party/ncnn/images
           echo 'org.gradle.java.home=/usr/lib/jvm/java-21-openjdk-amd64' >> gradle.properties
+
       - name: Build Skia for x86_64
         run: |
           bash tools/build_skia.sh x64
           bash tools/build_skia.sh compat-x64
+
       - name: Build the x86_64 APKs
         run: |
           ./gradlew -PamAbi=x86_64 :app:assembleFossRelease :app:assembleCompatRelease --no-daemon
           for apk in android/build/outputs/apk/foss/release/*.apk android/build/outputs/apk/compat/release/*.apk; do mv "$apk" "${apk%-release*}-x86_64-release${apk##*-release}"; done
+
       - name: Check unsigned APK packaging
         run: python3 tools/apk_check.py --unsigned android/build/outputs/apk/foss/release/*.apk android/build/outputs/apk/compat/release/*.apk
+
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: x86_64-apk
           path: |
             ${{ inputs.subdir || '.' }}/android/build/outputs/apk/foss/release/*.apk
             ${{ inputs.subdir || '.' }}/android/build/outputs/apk/compat/release/*.apk
+
       - name: Check the lowest Android version the native libraries need
         run: |
           python3 tools/api_floor.py --abi x86_64 android/build/outputs/apk/foss/release/*.apk
@@ -194,13 +227,19 @@ jobs:
         run: |
           apt-get update
           apt-get install -y --no-install-recommends git ca-certificates curl unzip xz-utils python3 python3-numpy python3-pil python3-fonttools nodejs clang openjdk-21-jdk-headless
+
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           ref: ${{ inputs.verify_ref || '' }}
+
+      - name: Fix script permissions
+        run: chmod +x gradlew tools/*.sh
+
       - name: Show the checked out source
         run: |
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
           git log -1 --format='%H %s'
+
       - name: Install the Android SDK
         run: |
           mkdir -p "$ANDROID_HOME/cmdline-tools"
@@ -210,11 +249,13 @@ jobs:
           mv /tmp/cmdline-tools/cmdline-tools "$ANDROID_HOME/cmdline-tools/latest"
           yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null
           "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "platform-tools" "platforms;android-37.0" "build-tools;37.0.0" "cmake;3.31.6" "ndk;30.0.16248370"
+
       - name: Quick checks (static checks, foss compile, unit tests)
         id: quick
         run: |
           echo 'org.gradle.java.home=/usr/lib/jvm/java-21-openjdk-amd64' >> gradle.properties
           sh tools/check.sh --quick
+
       - name: Write the unit test report reader
         if: ${{ !cancelled() }}
         working-directory: /
@@ -252,16 +293,20 @@ jobs:
               print(f"SLOW {t:.3f}s {name}")
           sys.exit(1 if failed else 0)
           PY
+
       - name: Compat unit tests
         id: compat
         if: ${{ !cancelled() && (steps.quick.outcome == 'success' || (inputs.diagnostic && steps.quick.outcome == 'failure')) }}
         run: ./gradlew :app:testCompatDebugUnitTest -q
+
       - name: Lint of both builds
         if: ${{ !cancelled() && (steps.compat.outcome == 'success' || steps.compat.outcome == 'failure') }}
         run: ./gradlew :app:lintFossDebug :app:lintCompatDebug -q
+
       - name: Failed unit tests
         if: ${{ !cancelled() }}
         run: python3 /tmp/test_failures.py android/build/test-results
+
       - name: Repeat the compat unit tests
         if: ${{ !cancelled() && inputs.diagnostic && (steps.compat.outcome == 'success' || steps.compat.outcome == 'failure') }}
         env:
@@ -279,6 +324,7 @@ jobs:
           done
           python3 /tmp/test_failures.py build/test-repeats
           exit $status
+
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: ${{ !cancelled() }}
         with:
